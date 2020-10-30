@@ -1,0 +1,117 @@
+FROM ruby:2.6.6 AS base
+
+ARG APP_ROOT
+ENV APP_ROOT=${APP_ROOT:-/srv/primero/application}
+ARG APP_UID
+ENV USER_ID=${APP_UID:-1000}
+ARG APP_GID
+ENV GROUP_ID=${APP_GID:-1000}
+ARG RAILS_LOG_PATH
+ENV RAILS_LOG_PATH=${RAILS_LOG_PATH:-/srv/primero/application/log/primero}
+ARG RAILS_ENV
+ENV RAILS_ENV=${RAILS_ENV:-production}
+
+ENV RUNTIME_PACKAGES nodejs gettext libsodium-dev p7zip
+
+RUN addgroup --gid ${GROUP_ID} \
+            && adduser \
+                --uid ${USER_ID} \
+                --gid ${GROUP_ID} \
+                --disabled-password \
+                --gecos '' \
+                --home /srv/primero \
+                primero
+WORKDIR ${APP_ROOT}
+RUN curl -sL https://deb.nodesource.com/setup_14.x | bash - \
+        && apt-get -yq update \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                unattended-upgrades \
+                # dependencies
+                ${RUNTIME_PACKAGES} \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean
+
+# -------------------------------------------------------------------- BUILD STAGE
+FROM base AS build-env
+
+ENV BUILD_PACKAGES curl wget libcurl4-openssl-dev build-essential git python
+ENV BUILD_DEP_PACKAGES libpq-dev
+ENV DEV_PACKAGES tree libcairo2-dev libpixman-1-dev
+
+# Grab our path from --build-arg and store it in an env
+
+# Temporary build-time secrets needed to run rails processes.
+# These are never persisted in the container images
+ENV PRIMERO_SECRET_KEY_BASE=PRIMERO_SECRET_KEY_BASE
+ENV DEVISE_SECRET_KEY=DEVISE_SECRET_KEY
+ENV DEVISE_JWT_SECRET_KEY=DEVISE_JWT_SECRET_KEY
+
+# Test if variables have been defined by build script
+# otherwise return 1 and stop docker build
+RUN test -n "$APP_ROOT" || (printf "APP_ROOT not defined\n" ; \
+            return 1); \
+        test -n "$RAILS_LOG_PATH" || (printf "RAILS_LOG_PATH not defined\n" ; \
+            return 1);
+
+RUN apt-get -yq update \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                # dependencies
+                ${BUILD_PACKAGES} \
+                ${BUILD_DEP_PACKAGES} \
+                ${DEV_PACKAGES} \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean
+
+COPY [ "Gemfile", "Gemfile.lock", "./" ]
+
+# Run bundle install
+RUN if [ "$RAILS_ENV" = "production" ]; \
+        then \
+        bundle install --without development test cucumber \
+        ; else \
+        bundle install \
+        ; fi
+
+# Run npm install
+COPY [ "package.json", "package-lock.json", "./" ]
+
+RUN npm install
+
+# Note: This has its build context set to the root dir so prepend 'docker' to
+# items that need to be copied from that directory
+#
+# Now copy over primero and do setup
+
+COPY . .
+
+RUN mkdir -p "$APP_ROOT/tmp/export" "$RAILS_LOG_PATH" \
+            && mkdir -p "$APP_ROOT/tmp/exports" "$RAILS_LOG_PATH" \
+            && rake primero:i18n_js
+
+# Intentionally cached seperately
+# Generates 32 random characters for the build-id...build id MUST be 32 characters (as its hardcoded)
+RUN mkdir -p /srv/primero/application/public \
+            && touch /srv/primero/application/public/build-id \
+            && echo "$RANDOM" > /srv/primero/application/public/build-id
+
+# Build UI
+RUN npm run build
+
+RUN rm -rf node_modules .tmp webpack postcss.config.js \
+        package.json package-lock.json babel.config.js app/javascript \
+        /usr/local/bundle/bundler/gems/*/.git \
+        /usr/local/bundle/cache/
+
+# -------------------------------------------------------------------- FINAL
+
+FROM base AS primero
+
+COPY [ "docker/sub.sh", "docker/application/root/", "/" ]
+COPY --from=build-env /usr/local/bundle/ /usr/local/bundle/
+COPY --from=build-env --chown=docker-primero $APP_ROOT .
+
+USER docker-primero
+VOLUME ["/srv/primero/application/storage", "/share/public"]
+ENTRYPOINT [ "/entrypoint.sh" ]
+
+CMD [ "primero-start" ]
