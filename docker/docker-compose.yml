@@ -17,24 +17,34 @@ services:
       - application
   postgres:
     image: "primeroims/postgres:${PRIMERO_TAG:-latest}"
+    build:
+      context: ./postgres
     volumes:
       - database:/var/lib/postgresql/data
     env_file:
       - docker/defaults.env
   solr:
     image: "primeroims/solr:${PRIMERO_TAG:-latest}"
+    build:
+      context: ..
+      dockerfile: ./docker/solr/Dockerfile
     env_file:
       - docker/defaults.env
     volumes:
       - solr_cores:/opt/solr/server/solr/mycores
   beanstalkd:
     image: "primeroims/beanstalkd:${PRIMERO_TAG:-latest}"
+    build:
+      context: ./beanstalkd
     env_file:
       - docker/defaults.env
     volumes:
       - beanstalkd:/var/lib/beanstalkd
   application:
     image: "primeroims/application:${PRIMERO_TAG:-latest}"
+    build:
+      context: ..
+      dockerfile: ./docker/application/Dockerfile
     depends_on:
       - solr
       - beanstalkd
